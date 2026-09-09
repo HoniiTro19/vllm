@@ -30,6 +30,11 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
+from vllm.models.kimi_k3.common.compiled_trace import graph_capture as k3_graph_capture
+from vllm.models.kimi_k3.common.compiled_trace import (
+    graph_replay_scope as k3_graph_replay_scope,
+)
+from vllm.models.kimi_k3.common.compiled_trace import warmup_scope
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
@@ -163,6 +168,7 @@ class CudaGraphManager:
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self.k3_trace_keys: dict[BatchExecutionDescriptor, str | None] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
@@ -382,7 +388,8 @@ class CudaGraphManager:
                     forward_fn = create_forward_fn(desc, warmup=True)
 
                     # Warmup
-                    forward_fn(CUDAGraphMode.NONE)
+                    with warmup_scope():
+                        forward_fn(CUDAGraphMode.NONE)
 
                     # Capture
                     logger.debug(
@@ -399,9 +406,9 @@ class CudaGraphManager:
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                             forward_fn(CUDAGraphMode.PIECEWISE)
                             continue
-                        assert desc not in self.graphs, (
-                            f"Graph already captured for {desc}"
-                        )
+                        assert (
+                            desc not in self.graphs
+                        ), f"Graph already captured for {desc}"
                         graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
@@ -413,8 +420,9 @@ class CudaGraphManager:
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=current_stream()
+                        with (
+                            k3_graph_capture({"descriptor": str(desc)}) as trace_key,
+                            torch.cuda.graph(graph, self.pool, stream=current_stream()),
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -427,6 +435,7 @@ class CudaGraphManager:
                             free_after = torch.accelerator.get_memory_info()[0]
                             self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
+                        self.k3_trace_keys[desc] = trace_key
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
 
@@ -469,11 +478,13 @@ class CudaGraphManager:
             num_ubatches=num_ubatches,
         )
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor):
+    def run_fullgraph(
+        self, desc: BatchExecutionDescriptor, *, trace_inputs=None, trace_metadata=None
+    ):
         """Replay a captured FULL cudagraph."""
-        assert desc.cg_mode == CUDAGraphMode.FULL, (
-            f"Expected FULL mode, got {desc.cg_mode}"
-        )
+        assert (
+            desc.cg_mode == CUDAGraphMode.FULL
+        ), f"Expected FULL mode, got {desc.cg_mode}"
         assert desc in self.graphs, f"No cudagraph for {desc}"
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).
@@ -482,7 +493,16 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
-        self.graphs[desc].replay()
+        with k3_graph_replay_scope(
+            self.k3_trace_keys.get(desc),
+            trace_inputs,
+            {
+                "descriptor": str(desc),
+                "live_request_metadata_available": trace_metadata is not None,
+                **(trace_metadata or {}),
+            },
+        ):
+            self.graphs[desc].replay()
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
@@ -660,10 +680,12 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
-        self, desc: BatchExecutionDescriptor
+        self, desc: BatchExecutionDescriptor, *, trace_inputs=None, trace_metadata=None
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
-        super().run_fullgraph(desc)
+        super().run_fullgraph(
+            desc, trace_inputs=trace_inputs, trace_metadata=trace_metadata
+        )
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
             return self.intermediate_tensors[: desc.num_tokens]

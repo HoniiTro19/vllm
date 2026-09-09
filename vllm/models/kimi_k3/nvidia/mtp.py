@@ -36,6 +36,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+from ..common.compiled_trace import install_model_trace, record_module
 from ..common.mtp import fused_mtp_input
 from .low_latency_gemm import enable_kimi_k3_low_latency_gemm
 from .model import (
@@ -114,16 +115,17 @@ class KimiK3MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert inputs_embeds is not None
-        hidden_states = self.eh_proj(
-            fused_mtp_input(
-                positions,
-                inputs_embeds,
-                previous_hidden_states,
-                self.enorm.weight,
-                self.hnorm.weight,
-                self.enorm.variance_epsilon,
-            )
+        normalized_inputs = fused_mtp_input(
+            positions,
+            inputs_embeds,
+            previous_hidden_states,
+            self.enorm.weight,
+            self.hnorm.weight,
+            self.enorm.variance_epsilon,
         )
+        record_module(self, "normalized_inputs", normalized_inputs)
+        hidden_states = self.eh_proj(normalized_inputs)
+        del normalized_inputs
         if self.mtp_block.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
@@ -220,6 +222,11 @@ class KimiK3MTP(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         enable_kimi_k3_low_latency_gemm(self, vllm_config.model_config.dtype)
+        install_model_trace(
+            self,
+            "mtp",
+            lambda: get_forward_context() if is_forward_context_available() else None,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

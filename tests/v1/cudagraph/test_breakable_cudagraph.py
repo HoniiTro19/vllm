@@ -6,6 +6,7 @@ Unit tests for the breakable cudagraph primitives.
 
 from __future__ import annotations
 
+import json
 import threading
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -143,6 +144,67 @@ def test_current_is_none_when_inactive():
 
     assert BreakableCUDAGraphCapture.current() is None
     assert BreakableCUDAGraphCapture.is_active() is False
+
+
+def test_trace_replays_graph_and_eager_intermediates(
+    cuda_capture_stream, tmp_path, monkeypatch
+):
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.models.kimi_k3.common import compiled_trace as tracing
+
+    monkeypatch.setenv("K3_TRACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("K3_TRACE_RUN_ID", "breakable-test")
+    monkeypatch.setattr(tracing, "_graphs", {})
+    monkeypatch.setattr(tracing, "_owners", {})
+    value = torch.ones(4, device="cuda")
+    intermediate = torch.zeros_like(value)
+    output = torch.zeros_like(value)
+    token = torch.zeros((), dtype=torch.int64, device="cuda")
+
+    def eager():
+        tracing.snapshot("eager.before", intermediate, token)
+        intermediate.add_(5)
+        tracing.snapshot("eager.after", intermediate, token)
+
+    cap = BreakableCUDAGraphCapture()
+    try:
+        with torch.inference_mode():
+            with cap:
+                intermediate.copy_(value * 2)
+                tracing.snapshot("graph.first", intermediate, token)
+                cap.add_eager(eager)
+                output.copy_(intermediate * 3)
+                tracing.snapshot("graph.last", output, token)
+            for step in range(2):
+                value.fill_(step + 1)
+                cap.replay(trace_inputs=value, trace_metadata={"step": step})
+    finally:
+        tracing.close_process()
+
+    saved = {}
+    for path in tmp_path.glob("*/frame-*.pt"):
+        frame = torch.load(path, weights_only=True)
+        step = frame["metadata"]["step"]
+        for tensor in frame["tensors"]:
+            if tensor["name"] in {
+                "graph.first",
+                "eager.before",
+                "eager.after",
+                "graph.last",
+            }:
+                saved[step, tensor["name"]] = tensor["value"]
+    assert len(saved) == 8
+    for step in range(2):
+        before = float(2 * (step + 1))
+        for name, expected in (
+            ("graph.first", before),
+            ("eager.before", before),
+            ("eager.after", before + 5),
+            ("graph.last", (before + 5) * 3),
+        ):
+            torch.testing.assert_close(saved[step, name], torch.full((4,), expected))
+    for path in tmp_path.glob("*/recorder_closed.json"):
+        assert json.loads(path.read_text())["coverage_verified"] is False
 
 
 def test_thread_local_active_during_context(cuda_capture_stream):

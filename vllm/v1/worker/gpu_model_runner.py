@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
+from vllm.models.kimi_k3.common.compiled_trace import traced_warmup
 import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
@@ -5920,6 +5921,7 @@ class GPUModelRunner(
         )
 
     @torch.inference_mode()
+    @traced_warmup
     def _dummy_run(
         self,
         num_tokens: int,

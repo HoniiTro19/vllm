@@ -99,6 +99,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MLP,
 )
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.kimi_k3.common.compiled_trace import install_model_trace, record_module
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
@@ -484,11 +485,11 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 logical_to_physical_map=eplb_state.logical_to_physical_map,
                 logical_replica_count=eplb_state.logical_replica_count,
                 record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
+                num_unpadded_tokens=(
+                    eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+                    if eplb_state.num_unpadded_tokens_tensors is not None
+                    else None
+                ),
             )
 
         prepare_megamoe_inputs(
@@ -779,6 +780,7 @@ class KimiMoE(nn.Module):
             hidden_states: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             router_logits, _ = self.gate(hidden_states)
+            record_module(self, "router_logits", router_logits)
             if not self.use_mega_moe:
                 return router_logits, None
             return fused_grouped_topk(
@@ -804,9 +806,11 @@ class KimiMoE(nn.Module):
                 lambda: down_proj(hidden_states),
                 self._down_proj_events[0],
                 self._down_proj_events[1],
-                self._down_proj_stream
-                if num_tokens <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
-                else None,
+                (
+                    self._down_proj_stream
+                    if num_tokens <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
+                    else None
+                ),
             )
         )
         return routed_hidden_states, router_output, topk_ids
@@ -820,6 +824,9 @@ class KimiMoE(nn.Module):
         routed_hidden_states, router_output, topk_ids = (
             self._maybe_overlap_router_and_down_proj(hidden_states)
         )
+        record_module(self, "routed_input", routed_hidden_states)
+        record_module(self, "router_output", router_output)
+        record_module(self, "topk_ids", topk_ids)
         if self.use_mega_moe:
             assert self.routed_output_transform is not None
             assert topk_ids is not None
@@ -829,6 +836,7 @@ class KimiMoE(nn.Module):
                 topk_ids,
                 activation_clamp=None,
             )
+            record_module(self, "experts.combined_output", final_hidden_states)
             # The shared output is folded into the up-projection GEMM's beta-add
             # epilogue, so combining the two branches costs no extra kernel.
             shared_output = (
@@ -1084,6 +1092,8 @@ class KimiDecoderLayer(nn.Module):
         prefix_sum: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        record_module(self, "input.hidden_states", hidden_states)
+        record_module(self, "input.prefix_sum", prefix_sum)
         hidden_states, prefix_sum, residual = self._pre_attn_norm(
             hidden_states, residual, prefix_sum
         )
@@ -1096,6 +1106,7 @@ class KimiDecoderLayer(nn.Module):
             hidden_states = hidden_states[: positions.shape[0]]
             M = hidden_states.shape[0]
 
+        record_module(self, "attention_input", hidden_states)
         # Attention.
         hidden_states = self._run_self_attn(positions, hidden_states)
 
@@ -1108,6 +1119,14 @@ class KimiDecoderLayer(nn.Module):
             hidden_states, residual, prefix_sum
         )
 
+        record_module(self, "mlp_input", hidden_states)
+        record_module(self, "prefix_sum", prefix_sum)
+        if self.use_attn_res:
+            record_module(
+                self,
+                "active_residual_bank",
+                residual[:, : self.prev_valid_blocks + self.is_block_write_layer],
+            )
         # MoE/MLP.
         hidden_states = self.mlp(hidden_states)
         return hidden_states, prefix_sum, residual
@@ -1202,9 +1221,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 self.output_attn_res_proj = PPMissingLayer()
 
         world_size = get_tensor_model_parallel_world_size()
-        assert config.num_attention_heads % world_size == 0, (
-            "num_attention_heads must be divisible by world_size"
-        )
+        assert (
+            config.num_attention_heads % world_size == 0
+        ), "num_attention_heads must be divisible by world_size"
 
     def make_empty_intermediate_tensors(
         self,
@@ -1373,9 +1392,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
+            assert (
+                not self.use_sequence_parallel
+            ), "Currently, SP is not supported with PP"
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
             return IntermediateTensors(
@@ -1618,6 +1637,11 @@ class KimiLinearForCausalLM(
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
+        )
+        install_model_trace(
+            self,
+            "main",
+            lambda: get_forward_context() if is_forward_context_available() else None,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -2077,13 +2101,13 @@ class KimiK3ForConditionalGeneration(
 
         target_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(target_dtype)
-        assert isinstance(grid_thws, torch.Tensor), (
-            f"expect grid_thws to be a tensor, got {type(grid_thws)}"
-        )
+        assert isinstance(
+            grid_thws, torch.Tensor
+        ), f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
-        assert grid_thws.ndim == 2 and grid_thws.size(1) == 3, (
-            f"unexpected shape for grid_thws: {grid_thws.shape}"
-        )
+        assert (
+            grid_thws.ndim == 2 and grid_thws.size(1) == 3
+        ), f"unexpected shape for grid_thws: {grid_thws.shape}"
 
         return KimiK25MediaPixelInputs(
             type="pixel_values",

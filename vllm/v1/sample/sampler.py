@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.models.kimi_k3.common.tensor_trace import event, traced_scope
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -70,6 +71,7 @@ class Sampler(nn.Module):
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
 
+    @traced_scope("sampler.legacy.forward")
     def forward(
         self,
         logits: torch.Tensor,
@@ -77,6 +79,22 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
+        event(
+            "sampler.inputs",
+            {
+                "logits": logits,
+                "temperature": sampling_metadata.temperature,
+                "top_k": sampling_metadata.top_k,
+                "top_p": sampling_metadata.top_p,
+            },
+            {
+                "predict_bonus_token": predict_bonus_token,
+                "all_greedy": sampling_metadata.all_greedy,
+                "all_random": sampling_metadata.all_random,
+                "committed_tokens": sampling_metadata.output_token_ids,
+                "spec_token_ids": sampling_metadata.spec_token_ids,
+            },
+        )
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -99,6 +117,7 @@ class Sampler(nn.Module):
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
         )
+        event("sampler.after_logits_processors", {"logits": logits})
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
@@ -147,6 +166,7 @@ class Sampler(nn.Module):
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
         )
+        event("sampler.output", {"token_ids": sampler_output.sampled_token_ids})
         return sampler_output
 
     def gather_specific_token_logprobs(

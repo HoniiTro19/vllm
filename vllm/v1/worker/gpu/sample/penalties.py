@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -183,6 +184,7 @@ def _penalties_kernel(
     tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
+@traced_scope("sampling.penalties.gpu")
 def apply_penalties(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -194,6 +196,23 @@ def apply_penalties(
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
 ) -> None:
+    if enabled():
+        rows = expanded_idx_mapping.long()
+        event(
+            "sampling.penalty_inputs",
+            {
+                "logits": logits,
+                "expanded_idx_mapping": expanded_idx_mapping,
+                "token_ids": token_ids,
+                "expanded_local_pos": expanded_local_pos,
+                "repetition_penalty": repetition_penalty[rows],
+                "presence_penalty": presence_penalty[rows],
+                "frequency_penalty": frequency_penalty[rows],
+                "prompt_bin_mask": prompt_bin_mask[rows],
+                "output_bin_counts": output_bin_counts[rows],
+            },
+            {"state_layout": "expanded_logit_rows"},
+        )
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
@@ -213,6 +232,7 @@ def apply_penalties(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+    event("sampling.penalty_output", {"logits": logits})
 
 
 @triton.jit

@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import gc
+import sys
 import threading
 import weakref
 from collections.abc import Callable
@@ -43,6 +44,14 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
+from vllm.models.kimi_k3.common.compiled_trace import (
+    context_observations,
+    graph_capture,
+    graph_replay_scope,
+    model_scope,
+    warmup_scope,
+)
+from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 
@@ -154,6 +163,9 @@ class BreakableCUDAGraphCapture:
         self._num_eager_breaks: int = 0
         self._current_graph: torch.cuda.CUDAGraph | None = None
         self._capturing: bool = False
+        self._trace_segment: Any = None
+        self._trace_segment_keys: list[str | None] = []
+        self._trace_key: str | None = None
 
     # --- context manager protocol ----------------------------------------
 
@@ -161,12 +173,16 @@ class BreakableCUDAGraphCapture:
         if getattr(BreakableCUDAGraphCapture._tls, "active", None) is not None:
             raise RuntimeError("Nested BreakableCUDAGraphCapture is not supported.")
         BreakableCUDAGraphCapture._tls.active = self
-        self._begin_segment()
+        try:
+            self._begin_segment()
+        except BaseException:
+            BreakableCUDAGraphCapture._tls.active = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
-            self._end_segment()
+            self._end_segment((exc_type, exc, tb))
         finally:
             BreakableCUDAGraphCapture._tls.active = None
 
@@ -175,22 +191,42 @@ class BreakableCUDAGraphCapture:
     def _begin_segment(self) -> None:
         assert not self._capturing
         g = torch.cuda.CUDAGraph()
-        if self.pool is not None:
-            g.capture_begin(pool=self.pool)
-        else:
-            g.capture_begin()
+        self._trace_segment = graph_capture(
+            {"execution": "breakable_segment", "segment_index": len(self.segments)}
+        )
+        self._trace_key = self._trace_segment.__enter__()
+        try:
+            if self.pool is not None:
+                g.capture_begin(pool=self.pool)
+            else:
+                g.capture_begin()
+        except BaseException:
+            self._trace_segment.__exit__(*sys.exc_info())
+            self._trace_segment = None
+            raise
         self._current_graph = g
         self._capturing = True
 
-    def _end_segment(self) -> None:
+    def _end_segment(self, exc_info=(None, None, None)) -> None:
         if not self._capturing:
             return
         assert self._current_graph is not None
-        self._current_graph.capture_end()
-        self.segments.append(self._current_graph.replay)
+        graph = self._current_graph
+        trace_segment = self._trace_segment
+        try:
+            try:
+                graph.capture_end()
+            except BaseException:
+                trace_segment.__exit__(*sys.exc_info())
+                raise
+            trace_segment.__exit__(*exc_info)
+        finally:
+            self._trace_segment = None
+            self._current_graph = None
+            self._capturing = False
+        self.segments.append(graph.replay)
+        self._trace_segment_keys.append(self._trace_key)
         self._num_graphs += 1
-        self._current_graph = None
-        self._capturing = False
 
     def add_eager(self, fn: Callable[[], Any]) -> Any:
         """End the current capture segment, run ``fn`` eagerly on the
@@ -201,17 +237,34 @@ class BreakableCUDAGraphCapture:
         downstream dependencies via static output buffers.
         """
         self._end_segment()
-        result = fn()
+        # This invocation initializes static buffers at capture time. Eager
+        # observations must be taken anew on each serving replay, not frozen
+        # alongside CUDA snapshots from the surrounding graph segments.
+        with warmup_scope():
+            result = fn()
         self.segments.append(fn)
+        self._trace_segment_keys.append(None)
         self._num_eager_breaks += 1
         self._begin_segment()
         return result
 
     # --- replay ----------------------------------------------------------
 
-    def replay(self) -> None:
-        for r in self.segments:
-            r()
+    def replay(self, *, trace_inputs=None, trace_metadata=None) -> None:
+        if not k3_trace_enabled():
+            for r in self.segments:
+                r()
+            return
+        for index, (r, key) in enumerate(
+            zip(self.segments, self._trace_segment_keys, strict=True)
+        ):
+            metadata = {**(trace_metadata or {}), "segment_index": index}
+            if key is not None:
+                with graph_replay_scope(key, trace_inputs, metadata):
+                    r()
+            else:
+                with model_scope("breakable.eager_segment", trace_inputs, metadata):
+                    r()
 
     # --- introspection ---------------------------------------------------
 
@@ -418,5 +471,16 @@ class BreakableCUDAGraphWrapper:
         # dependencies from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
         assert entry.capture is not None
-        entry.capture.replay()
+        if k3_trace_enabled():
+            metadata, context_tensors = context_observations(get_forward_context())
+            entry.capture.replay(
+                trace_inputs={
+                    "args": args,
+                    "kwargs": kwargs,
+                    "context": context_tensors,
+                },
+                trace_metadata=metadata,
+            )
+        else:
+            entry.capture.replay()
         return entry.output

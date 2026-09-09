@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
+from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
@@ -89,6 +90,7 @@ class RejectionSampler(nn.Module):
             )
         self.synthetic_mode = self.synthetic_conditional_rates is not None
 
+    @traced_scope("mtp.legacy_rejection_sample")
     def forward(
         self,
         metadata: SpecDecodeMetadata,
@@ -121,6 +123,26 @@ class RejectionSampler(nn.Module):
                 requested.
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+        if enabled():
+            event(
+                "mtp.legacy_rejection_sample.inputs",
+                {
+                    "raw_logits": logits,
+                    "draft_probs": draft_probs,
+                    "draft_token_ids": metadata.draft_token_ids,
+                    "cu_num_draft_tokens": metadata.cu_num_draft_tokens,
+                    "cu_num_sampled_tokens": metadata.cu_num_sampled_tokens,
+                    "target_logits_indices": metadata.target_logits_indices,
+                    "bonus_logits_indices": metadata.bonus_logits_indices,
+                    "logits_indices": metadata.logits_indices,
+                    "synthetic_conditional_rates": self.synthetic_conditional_rates,
+                },
+                {
+                    "num_draft_tokens": metadata.num_draft_tokens,
+                    "synthetic_mode": self.synthetic_mode,
+                    "use_fp64_gumbel": self.use_fp64_gumbel,
+                },
+            )
 
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
@@ -145,6 +167,7 @@ class RejectionSampler(nn.Module):
             else "raw_logits",
         )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
+        event("mtp.legacy_rejection_sample.bonus", {"bonus_token_ids": bonus_token_ids})
 
         # Just like `bonus_logits`, `target_logits` is a new tensor with
         # separate storage from the original `logits` tensor. Therefore,
@@ -170,6 +193,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
+        event("mtp.legacy_rejection_sample.processed_logits", {"logits": target_logits})
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
@@ -184,6 +208,11 @@ class RejectionSampler(nn.Module):
             use_fp64_gumbel=self.use_fp64_gumbel,
         )
 
+        event(
+            "mtp.legacy_rejection_sample.output",
+            {"sampled_tokens": output_token_ids},
+            {"invalid_token_id": -1},
+        )
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
             logprobs_tensors = self._get_logprobs_tensors(

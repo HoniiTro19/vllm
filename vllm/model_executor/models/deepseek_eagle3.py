@@ -23,6 +23,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLAAttention,
     DeepseekV2MLP,
 )
+from vllm.models.kimi_k3.common.compiled_trace import record_module
 from vllm.multimodal.inputs import NestedTensors
 
 from .interfaces import LocalArgmaxMixin
@@ -41,6 +42,8 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
     1. Always uses MLP (not MoE)
     2. First layer accepts concatenated embeds + hidden_states
     """
+
+    attention_cls = DeepseekV2MLAAttention
 
     def __init__(
         self,
@@ -66,7 +69,7 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
-        self.self_attn = DeepseekV2MLAAttention(
+        self.self_attn = self.attention_cls(
             vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
@@ -134,6 +137,9 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
             # Subsequent layers: process hidden_states and residuals only
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        record_module(self, "attention_input", hidden_states)
+        record_module(self, "residual_before_attention", residual)
+
         # Self Attention
         hidden_states = self.self_attn(
             positions=positions,
@@ -142,6 +148,7 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
         )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        record_module(self, "attention_residual", residual)
 
         # Fully Connected (MLP, not MoE)
         hidden_states = self.mlp(hidden_states)
@@ -151,6 +158,8 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DeepseekV2Eagle3Model(nn.Module):
+    decoder_layer_cls = DeepseekV2Eagle3DecoderLayer
+
     def __init__(
         self,
         *,
@@ -176,7 +185,7 @@ class DeepseekV2Eagle3Model(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                DeepseekV2Eagle3DecoderLayer(
+                self.decoder_layer_cls(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                     config=self.config,
@@ -250,6 +259,8 @@ class DeepseekV2Eagle3Model(nn.Module):
             )
 
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
+        record_module(self, "hidden_prenorm", hidden_prenorm)
+        record_module(self, "hidden_postnorm", hidden_states)
 
         # norm_output variant uses the post-norm hidden states.
         aux_output = hidden_states if self.norm_output else hidden_prenorm
@@ -275,6 +286,8 @@ class DeepseekV2Eagle3Model(nn.Module):
 class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""
 
+    model_cls = DeepseekV2Eagle3Model
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
@@ -290,7 +303,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
         # Store target layer count in draft config
         self.config.target_layer_count = target_layer_num
 
-        self.model = DeepseekV2Eagle3Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,

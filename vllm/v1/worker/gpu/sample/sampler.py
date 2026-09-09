@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
+from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -273,6 +274,7 @@ class Sampler:
             logits, expanded_idx_mapping, idx_mapping_np
         )
 
+    @traced_scope("sampler.gpu.sample")
     def sample(
         self,
         logits: torch.Tensor,
@@ -284,6 +286,22 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if enabled():
+            event(
+                "sampler.inputs",
+                {
+                    "logits": logits,
+                    "expanded_idx_mapping": expanded_idx_mapping,
+                    "idx_mapping": idx_mapping,
+                    "positions": pos,
+                    "input_ids": input_ids,
+                    "expanded_local_pos": expanded_local_pos,
+                    "temperature": self.sampling_states.temperature.gpu[
+                        expanded_idx_mapping.long()
+                    ],
+                },
+                {"request_id_to_index": self.req_states.req_id_to_index},
+            )
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -296,6 +314,10 @@ class Sampler:
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
+        )
+        event(
+            "sampling.processed_logits",
+            {"logits": processed_logits, "top_k": top_k, "top_p": top_p},
         )
         use_flashinfer = self.use_flashinfer and not (
             # Don't use FI sampler if no requests use top_k/top_p, if there are
@@ -322,4 +344,5 @@ class Sampler:
                 is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
             )
+        event("sampling.output", {"token_ids": sampled}, {"flashinfer": use_flashinfer})
         return sampled, processed_logits

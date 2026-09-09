@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.models.kimi_k3.common.compiled_trace import draft_graph_observations
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -304,7 +305,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
-            self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
+            self.prefill_cudagraph_manager.run_fullgraph(
+                prefill_batch_desc,
+                **draft_graph_observations(
+                    self, input_batch, prefill_batch_desc, "draft_prefill", step=0
+                ),
+            )
         else:
             # The target model's attention metadata and slot mappings
             # can directly be used for draft prefill, because of the
@@ -372,6 +378,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
+            trace_input_batch=input_batch,
         )
         self.on_multi_step_decode_end(num_reqs)
 
@@ -488,6 +495,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        *,
+        trace_input_batch: InputBatch | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -521,7 +530,20 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.decode_cudagraph_manager is not None
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                self.decode_cudagraph_manager.run_fullgraph(
+                    batch_desc,
+                    **(
+                        draft_graph_observations(
+                            self,
+                            trace_input_batch,
+                            batch_desc,
+                            "draft_decode",
+                            step=step,
+                        )
+                        if trace_input_batch is not None
+                        else {}
+                    ),
+                )
             else:
                 self._generate_draft(
                     num_reqs,
@@ -539,6 +561,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
+        *,
+        trace_input_batch: InputBatch | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -568,7 +592,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            self.decode_cudagraph_manager.run_fullgraph(
+                batch_desc,
+                **(
+                    draft_graph_observations(
+                        self, trace_input_batch, batch_desc, "draft_fused_decode"
+                    )
+                    if trace_input_batch is not None
+                    else {}
+                ),
+            )
             return
 
         self._generate_fused_drafts(

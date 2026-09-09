@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -141,6 +142,7 @@ class RejectionSampler:
             in ("raw_logits", "processed_logits"),
         )
 
+    @traced_scope("mtp.rejection_verify")
     def _verify(
         self,
         logits: torch.Tensor,
@@ -153,6 +155,28 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if enabled():
+            event(
+                "mtp.rejection_verify.inputs",
+                {
+                    "raw_logits": logits,
+                    "draft_logits": draft_logits,
+                    "draft_sampled": draft_sampled,
+                    "positions": pos,
+                    "cu_num_logits": cu_num_logits,
+                    "idx_mapping": idx_mapping,
+                    "expanded_idx_mapping": expanded_idx_mapping,
+                    "expanded_local_pos": expanded_local_pos,
+                    "temperature": self.sampler.sampling_states.temperature.gpu,
+                    "seeds": self.sampler.sampling_states.seeds.gpu,
+                    "synthetic_conditional_rates": self.synthetic_conditional_rates,
+                },
+                {
+                    "num_speculative_steps": self.num_speculative_steps,
+                    "use_fp64": self.sampler.use_fp64_gumbel,
+                    "use_block_verification": self.use_block_verification,
+                },
+            )
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -162,6 +186,7 @@ class RejectionSampler:
             draft_sampled,
             expanded_local_pos,
         )
+        event("mtp.rejection_verify.processed_logits", {"logits": processed_logits})
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -177,6 +202,10 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+        )
+        event(
+            "mtp.rejection_verify.output",
+            {"sampled_tokens": sampled, "accepted_length_including_bonus": num_sampled},
         )
         return processed_logits, sampled, num_sampled
 
@@ -257,6 +286,7 @@ class RejectionSampler:
         num_sampled = torch.cat(num_sampled_chunks)
         return sampled, num_sampled, logprobs_tensors
 
+    @traced_scope("mtp.rejection_sample")
     def __call__(
         self,
         logits: torch.Tensor,
@@ -267,6 +297,20 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
+        if enabled():
+            event(
+                "mtp.rejection_sample.batch",
+                {
+                    "idx_mapping": input_batch.idx_mapping,
+                    "logits_indices": input_batch.logits_indices,
+                    "cu_num_logits": input_batch.cu_num_logits,
+                    "seq_lens": input_batch.seq_lens,
+                },
+                {
+                    "request_ids": input_batch.req_ids,
+                    "adaptive_verification": self.enable_adaptive_verification,
+                },
+            )
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]
 
@@ -284,6 +328,10 @@ class RejectionSampler:
             max_num_logprobs,
         )
 
+        event(
+            "mtp.rejection_sample.before_prefill_mask",
+            {"sampled_tokens": sampled, "num_sampled": num_sampled},
+        )
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
             input_batch.seq_lens,
@@ -292,6 +340,14 @@ class RejectionSampler:
             self.sampler.req_states.prefill_len.gpu,
         )
 
+        event(
+            "mtp.rejection_sample.output",
+            {
+                "sampled_tokens": sampled,
+                "num_sampled": num_sampled,
+                "num_rejected": num_rejected,
+            },
+        )
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,

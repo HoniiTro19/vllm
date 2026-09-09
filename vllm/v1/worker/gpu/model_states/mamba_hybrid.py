@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
+from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -337,12 +338,44 @@ class MambaHybridModelState(DefaultModelState):
             )
         return attn_metadata
 
+    @traced_scope("mtp.linear_state_commit")
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
+
+        def trace_state(stage):
+            if not enabled():
+                return
+            tensors = {
+                "idx_mapping": idx_mapping,
+                "num_computed_tokens": num_computed_tokens,
+                "num_sampled": (
+                    num_sampled if isinstance(num_sampled, torch.Tensor) else None
+                ),
+                "num_accepted_by_request_index": self.num_accepted_tokens_gpu,
+            }
+            for name in (
+                "_mamba_state_idx_gpu",
+                "_mamba_src_col_gpu",
+                "_mamba_src_off_gpu",
+            ):
+                tensors[name] = getattr(self, name, None)
+            event(
+                stage,
+                tensors,
+                {
+                    "align_mode": self._align_mode,
+                    "recover_ssm": self.recoverssm is not None,
+                    "uniform_num_sampled": (
+                        num_sampled if isinstance(num_sampled, int) else None
+                    ),
+                },
+            )
+
+        trace_state("mtp.linear_state.before_commit")
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
@@ -371,6 +404,7 @@ class MambaHybridModelState(DefaultModelState):
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
             )
 
+        trace_state("mtp.linear_state.after_recovery")
         if not num_reqs:
             return
 
@@ -390,6 +424,7 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
+        trace_state("mtp.linear_state.after_align")
 
 
 @triton.jit

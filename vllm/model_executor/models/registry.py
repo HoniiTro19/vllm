@@ -660,6 +660,9 @@ _SPECULATIVE_DECODING_MODELS = {
     ),
     "Eagle3DeepseekV2ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
+    "Eagle3DeepseekV2SWAForCausalLM": (
+        "deepseek_eagle3_swa", "Eagle3DeepseekV2SWAForCausalLM"
+    ),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "DeepseekV32MTPModel": ("vllm.models.deepseek_v32", "DeepseekV32MTP"),

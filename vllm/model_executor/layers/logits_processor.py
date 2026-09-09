@@ -21,6 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.models.kimi_k3.common.compiled_trace import record_module
 from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
@@ -140,6 +141,7 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Project hidden states through the lm_head, honoring head_dtype."""
+        record_module(lm_head, "head_input", hidden_states)
         if self.head_dtype is None or self.head_dtype == hidden_states.dtype:
             return lm_head.quant_method.apply(
                 lm_head, hidden_states, bias=embedding_bias
@@ -186,6 +188,7 @@ class LogitsProcessor(PluggableLayer):
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        record_module(lm_head, "logits.local", logits)
         if skip_gather:
             return logits
 
@@ -218,6 +221,7 @@ class LogitsProcessor(PluggableLayer):
         tp_size = lm_head.tp_size
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        record_module(lm_head, "logits.local", logits)
         if self.soft_cap is not None:
             logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
         if self.scale != 1.0:
@@ -274,6 +278,7 @@ class LogitsProcessor(PluggableLayer):
             )
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        record_module(lm_head, "logits.local", logits)
 
         # Mask out padding entries beyond org_vocab_size on this shard.
         num_pad = lm_head.shard_indices.num_org_vocab_padding

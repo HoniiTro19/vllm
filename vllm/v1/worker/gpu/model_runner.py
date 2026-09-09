@@ -29,6 +29,12 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.models.kimi_k3.common.compiled_trace import (
+    fullgraph_observations,
+    traced_warmup,
+)
+from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
+from vllm.models.kimi_k3.common.tensor_trace import event as k3_trace_event
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -723,6 +729,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
+    @traced_warmup
     def _dummy_run(
         self,
         num_tokens: int,
@@ -1533,6 +1540,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_bin_counts = self.sampler.penalties_state.output_bin_counts
         else:
             output_bin_counts = None
+
+        def trace_state(stage):
+            if not k3_trace_enabled():
+                return
+            # A negative mapping is a masked PP row, not the last request slot.
+            # Its diagnostic gather row is invalid and must be ignored using
+            # the saved original mapping and valid_rows mask.
+            rows = idx_mapping.clamp_min(0).long()
+            tensors = {
+                "idx_mapping": idx_mapping,
+                "valid_rows": idx_mapping >= 0,
+                "sampled_tokens": sampled_tokens,
+                "num_sampled": num_sampled,
+                "num_rejected": num_rejected,
+                "query_start_loc": query_start_loc,
+            }
+            for name in (
+                "all_token_ids",
+                "total_len",
+                "num_computed_tokens",
+                "prefill_len",
+                "prompt_len",
+            ):
+                tensors[name] = getattr(self.req_states, name).gpu.index_select(0, rows)
+            tensors["last_sampled_tokens"] = (
+                self.req_states.last_sampled_tokens.index_select(0, rows)
+            )
+            if output_bin_counts is not None:
+                tensors["output_bin_counts"] = output_bin_counts.index_select(0, rows)
+            k3_trace_event(
+                stage,
+                tensors,
+                {
+                    "request_id_to_index": self.req_states.req_id_to_index,
+                    "max_seq_len_by_request_index": self.req_states.max_seq_len.tolist(),
+                    "inactive_token_tail": "only positions below total_len are committed",
+                },
+            )
+
+        trace_state("request_state.before_token_commit")
         post_update(
             idx_mapping,
             self.req_states.num_computed_tokens.gpu,
@@ -1545,6 +1592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
         )
+        trace_state("request_state.after_token_commit")
 
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
@@ -1807,7 +1855,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            model_output = self.cudagraph_manager.run_fullgraph(
+                batch_desc,
+                **fullgraph_observations(
+                    model_inputs, input_batch, slot_mappings_by_layer
+                ),
+            )
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(

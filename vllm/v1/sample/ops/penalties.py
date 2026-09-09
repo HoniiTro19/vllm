@@ -4,9 +4,11 @@
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
+from vllm.models.kimi_k3.common.tensor_trace import event, traced_scope
 from vllm.utils.torch_utils import PIN_MEMORY, make_tensor_with_pad
 
 
+@traced_scope("sampling.penalties.legacy")
 def apply_all_penalties(
     logits: torch.Tensor,
     prompt_token_ids: torch.Tensor,
@@ -28,7 +30,19 @@ def apply_all_penalties(
     # will be reworked anyhow.
     output_tokens_t.masked_fill_(output_tokens_t == -1, vocab_size)
 
-    return apply_penalties(
+    event(
+        "sampling.penalty_inputs",
+        {
+            "logits": logits,
+            "prompt_token_ids": prompt_token_ids,
+            "output_token_ids": output_tokens_t,
+            "presence_penalty": presence_penalties,
+            "frequency_penalty": frequency_penalties,
+            "repetition_penalty": repetition_penalties,
+        },
+        {"padding_token_id": vocab_size, "output_history": output_token_ids},
+    )
+    result = apply_penalties(
         logits,
         prompt_token_ids,
         output_tokens_t,
@@ -36,6 +50,8 @@ def apply_all_penalties(
         frequency_penalties,
         repetition_penalties,
     )
+    event("sampling.penalty_output", {"logits": result})
+    return result
 
 
 def _convert_to_tensors(

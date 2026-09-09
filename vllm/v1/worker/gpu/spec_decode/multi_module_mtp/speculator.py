@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.models.kimi_k3.common.compiled_trace import draft_graph_observations
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -241,7 +242,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.cudagraph_manager is not None
-            self.cudagraph_manager.run_fullgraph(batch_desc)
+            self.cudagraph_manager.run_fullgraph(
+                batch_desc,
+                **draft_graph_observations(
+                    self, input_batch, batch_desc, "multi_module_mtp"
+                ),
+            )
         else:
             self._generate_drafts(
                 num_reqs,

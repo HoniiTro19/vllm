@@ -23,6 +23,11 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
+from vllm.models.kimi_k3.common.compiled_trace import (
+    context_observations,
+    graph_capture,
+    graph_replay_scope,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
@@ -129,6 +134,7 @@ class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
     cudagraph: torch.cuda.CUDAGraph | None = None
     output: Any | None = None
+    k3_trace_key: str | None = None
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
@@ -309,6 +315,17 @@ class CUDAGraphWrapper:
                 # Ensure any pre-capture prefetches from offloader are complete.
                 get_offloader().sync_prev_onload()
 
+                entry.k3_trace_key = stack.enter_context(
+                    graph_capture(
+                        {
+                            "runtime_mode": self.runtime_mode.name,
+                            "batch_descriptor": dataclasses.asdict(
+                                entry.batch_descriptor
+                            ),
+                        }
+                    )
+                )
+
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(
                     cudagraph,
@@ -357,5 +374,14 @@ class CUDAGraphWrapper:
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
-        entry.cudagraph.replay()
+        if entry.k3_trace_key is not None:
+            metadata, context_tensors = context_observations(forward_context)
+            with graph_replay_scope(
+                entry.k3_trace_key,
+                {"args": args, "kwargs": kwargs, "context": context_tensors},
+                metadata,
+            ):
+                entry.cudagraph.replay()
+        else:
+            entry.cudagraph.replay()
         return entry.output
