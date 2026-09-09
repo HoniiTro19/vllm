@@ -492,6 +492,16 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 ),
             )
 
+        record_module(
+            self,
+            "dispatch.input",
+            {
+                "hidden_states": hidden_states,
+                "expert_ids": topk_ids,
+                "routing_weights": topk_weights,
+                "is_padding": is_padding,
+            },
+        )
         prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
@@ -501,6 +511,16 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer.topk_idx[:num_tokens],
             symm_buffer.topk_weights[:num_tokens],
             is_padding=is_padding,
+        )
+        record_module(
+            self,
+            "dispatch.packed",
+            {
+                "x": symm_buffer.x[:num_tokens],
+                "x_sf": symm_buffer.x_sf[:num_tokens],
+                "expert_ids": symm_buffer.topk_idx[:num_tokens],
+                "routing_weights": symm_buffer.topk_weights[:num_tokens],
+            },
         )
         self.finalize_weights()
         assert self._transformed_l1_weights is not None
@@ -516,6 +536,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
         )
+        record_module(self, "dispatch.output", y)
         return y
 
 
