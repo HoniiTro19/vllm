@@ -375,11 +375,28 @@ def fullgraph_observations(model_inputs, input_batch, slot_mapping=None):
     return {
         "trace_inputs": tensors,
         "trace_metadata": {
-            "request_ids": input_batch.req_ids,
-            "num_tokens": input_batch.num_tokens,
+            "request_ids": list(input_batch.req_ids),
+            # The legacy InputBatch has no num_tokens field. Its valid row
+            # counts remain available in the layer attention metadata.
+            "num_tokens": getattr(input_batch, "num_tokens", None),
             "num_reqs": input_batch.num_reqs,
         },
     }
+
+
+@contextmanager
+def worker_model_scope(model_inputs, input_batch, slot_mapping=None):
+    """Associate eager/piecewise model observations with the live request batch."""
+    if not enabled():
+        yield
+        return
+    observations = fullgraph_observations(model_inputs, input_batch, slot_mapping)
+    with model_scope(
+        "worker.model",
+        observations["trace_inputs"],
+        observations["trace_metadata"],
+    ):
+        yield
 
 
 def install_model_trace(model, name, context_provider=None):

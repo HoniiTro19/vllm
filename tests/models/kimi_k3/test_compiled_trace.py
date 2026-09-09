@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -57,6 +58,36 @@ class CompiledTraceTest(unittest.TestCase):
             for path in self.root.glob("*/frame-*.pt")
         ]
         return sorted(frames, key=lambda frame: frame["metadata"]["observation_id"])
+
+    def test_worker_scope_retains_request_order_and_inputs_before_reuse(self):
+        # A model frame must retain the live batch identity even when the
+        # scheduler reorders requests and reuses the input buffer afterward.
+        batch = SimpleNamespace(req_ids=["first", "second"], num_reqs=2)
+        tokens = torch.tensor([11, 22])
+        token = torch.zeros((), dtype=torch.int64)
+        for step in range(2):
+            with (
+                tracing.worker_model_scope({"input_ids": tokens}, batch),
+                tracing.model_scope("main.forward"),
+            ):
+                tracing.snapshot("layer.output", tokens * 2, token)
+            batch.req_ids.reverse()
+            tokens.add_(100)
+        tracing.close_process()
+        frames = self.frames()
+        self.assertEqual(len(frames), 2)
+        for step, frame in enumerate(frames):
+            self.assertEqual(
+                frame["metadata"]["request_ids"],
+                ["first", "second"] if step == 0 else ["second", "first"],
+            )
+            self.assertIsNone(frame["metadata"]["num_tokens"])
+            tensors = {item["name"]: item["value"] for item in frame["tensors"]}
+            expected = torch.tensor([11, 22]) + 100 * step
+            torch.testing.assert_close(
+                tensors["worker.model.inputs.model_inputs.input_ids"], expected
+            )
+            torch.testing.assert_close(tensors["layer.output"], expected * 2)
 
     @torch.inference_mode()
     def test_fullgraph_retains_observations_before_input_mutation_on_every_call(self):

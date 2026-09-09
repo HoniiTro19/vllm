@@ -126,7 +126,7 @@ from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.k3_compiled_trace import traced_warmup
+from vllm.utils.k3_compiled_trace import traced_warmup, worker_model_scope
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -3964,13 +3964,15 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-        return self.model(
+        model_inputs = dict(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
+        with worker_model_scope(model_inputs, self.input_batch):
+            return self.model(**model_inputs)
 
     @staticmethod
     def _is_uniform_decode(
