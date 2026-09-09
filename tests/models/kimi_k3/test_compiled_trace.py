@@ -19,6 +19,7 @@ from unittest.mock import patch
 import torch
 
 from vllm.utils import k3_compiled_trace as tracing
+from vllm.utils.k3_megamoe_trace import expert_output_tensors
 
 
 class CompiledTraceTest(unittest.TestCase):
@@ -124,6 +125,39 @@ class CompiledTraceTest(unittest.TestCase):
                 tensors["after"],
                 torch.full((2, 3), float(step + 10), dtype=torch.bfloat16),
             )
+
+    @torch.inference_mode()
+    def test_compiled_expert_outputs_keep_slots_and_mask_stale_padding(self):
+        module = torch.nn.Module()
+        module._k3_trace_path = "moe"
+        module._k3_trace_token = torch.zeros((), dtype=torch.int64)
+
+        def operation(view, ids):
+            tracing.record_module(module, "fc2", expert_output_tensors(view, ids))
+            view.fill_(-100)
+            ids.fill_(-1)
+            return view
+
+        compiled = torch.compile(operation, backend="aot_eager", fullgraph=True)
+        view = torch.tensor(
+            [[[1, 2], [3, 4], [99, 99]], [[5, 6], [float("nan"), 8], [99, 99]]],
+            dtype=torch.bfloat16,
+        )
+        with tracing.model_scope("moe"):
+            compiled(view, torch.tensor([[7, 9], [4, -1]]))
+        tracing.close_process()
+        self.assertEqual(len(self.frames()), 1)
+        tensors = {item["name"]: item["value"] for item in self.frames()[0]["tensors"]}
+        torch.testing.assert_close(
+            tensors["moe.fc2.values"],
+            torch.tensor([[[1, 2], [5, 6]], [[3, 4], [0, 0]]], dtype=torch.bfloat16),
+        )
+        torch.testing.assert_close(
+            tensors["moe.fc2.expert_ids"], torch.tensor([[7, 9], [4, -1]])
+        )
+        torch.testing.assert_close(
+            tensors["moe.fc2.valid"], torch.tensor([[True, True], [True, False]])
+        )
 
     @torch.inference_mode()
     def test_compiled_cache_selection_keeps_zero_slot_and_live_indices(self):

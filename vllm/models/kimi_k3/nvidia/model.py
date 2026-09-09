@@ -115,6 +115,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.k3_compiled_trace import install_model_trace, record_module
+from vllm.utils.k3_megamoe_trace import (
+    expert_output_tensors,
+    prepare_expert_output_view,
+)
+from vllm.utils.k3_tensor_trace import enabled as trace_enabled
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -428,7 +433,7 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             self.intermediate_size,
             self.activation,
         )
-        symm_buffer = self._kimi_symm_buffer_cache.get(key)
+        symm_buffer = cast(Any, self._kimi_symm_buffer_cache.get(key))
         if symm_buffer is None:
             symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 group,
@@ -440,6 +445,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 activation=self.activation,
             )
             self._kimi_symm_buffer_cache[key] = symm_buffer
+        if trace_enabled() and not hasattr(symm_buffer, "_k3_expert_output_view"):
+            symm_buffer._k3_expert_output_view = prepare_expert_output_view(
+                symm_buffer, deep_gemm
+            )
         return symm_buffer
 
     def forward(
@@ -537,6 +546,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             fast_math=fast_math,
         )
         record_module(self, "dispatch.output", y)
+        if getattr(self, "_k3_trace_token", None) is not None:
+            record_module(
+                self,
+                "experts.fc2",
+                expert_output_tensors(
+                    symm_buffer._k3_expert_output_view,
+                    symm_buffer.topk_idx[:num_tokens],
+                ),
+            )
         return y
 
 
