@@ -90,6 +90,7 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.utils.k3_compiled_trace import record_module
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
@@ -526,6 +527,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         q_c, kv_c, k_pe = qkv_lora.split(
             [q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        record_module(self, "projection.qkv_latent", qkv_lora)
         q_c, kv_c_normed = fused_q_kv_rmsnorm(
             q_c,
             kv_c,
@@ -533,6 +535,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_a_layernorm.weight.data,
             self.rms_norm_eps,
         )
+        record_module(self, "latent_q_normalized", q_c)
+        record_module(self, "latent_kv_normalized", kv_c_normed)
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
 
         attn_out = torch.empty(
@@ -622,18 +626,25 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        record_module(self, "attention_input", hidden_states)
         if self.q_lora_rank is None:
             attn_out, gate = self._forward_full_rank_q(positions, hidden_states)
         else:
             attn_out, gate = self._forward_q_lora(positions, hidden_states)
 
+        record_module(self, "attention_before_gate", attn_out)
+        record_module(self, "raw_output_gate", gate)
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
+        record_module(self, "attention_after_gate", attn_out)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
-            return self.gemm_rs_ar(attn_out, self.o_proj.weight)
+            output = self.gemm_rs_ar(attn_out, self.o_proj.weight)
+        else:
+            output = self.o_proj(attn_out)[0]
 
-        return self.o_proj(attn_out)[0]
+        record_module(self, "output_projection", output)
+        return output
 
     @eager_break_during_capture
     def _attention(
@@ -664,6 +675,14 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         k_pe = k_pe[:num_actual_toks]
         positions = positions[:num_actual_toks]
         attn_out = attn_out[:num_actual_toks]
+        record_module(self, "attention.q", q)
+        record_module(self, "attention.latent_kv", kv_c_normed)
+        record_module(self, "attention.k_suffix", k_pe)
+        record_module(
+            self,
+            "attention.metadata",
+            {"positions": positions, "slot_mapping": slot_mapping[:num_actual_toks]},
+        )
 
         cos_sin_cache = None
         rope_positions = None
@@ -702,6 +721,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             )
             # BMM1: absorb q_nope into latent space. (N,B,P) x (N,P,L) -> (B,N,L)
             ql_nope = torch.bmm(mqa_q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+            record_module(self, "decode.absorbed_query", ql_nope)
             # Fused: concat mqa_q = [ql_nope | q_pe] and insert the decode-token
             # latent into the paged cache (one launch, right before forward_mqa).
             mqa_q = self._decode_concat_cache(
@@ -713,6 +733,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache,
                 slot_mapping[:num_mqa_tokens],
             )
+            record_module(self, "decode.query", mqa_q)
             if self.dcp_world_size > 1:
                 assert self.dcp_manager is not None
                 assert self.dcp_manager.query_gather is not None
@@ -720,6 +741,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
                 mqa_q, self._attn_read_kv_cache(), attn_metadata, self
             )
+            record_module(self, "decode.latent_output", latent_out)
+            record_module(self, "decode.lse", lse)
             if self.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
@@ -733,6 +756,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                     ],
                 )
             self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
+            record_module(self, "decode.value_projection", attn_out[:num_mqa_tokens])
 
     def _decode_concat_cache(
         self,
@@ -859,9 +883,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 k, v = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
             else:
                 k = fused_mla_kv_concat(k_nope, k_pe)
+            record_module(self, "prefill.context.k", k)
+            record_module(self, "prefill.context.v", v)
             attn_output, attn_lse = prefill_backend.run_prefill_context_chunk(
                 chunk=chunk, q=q[chunk.token_slice], k=k, v=v, out=out
             )
+            record_module(self, "prefill.context.output", attn_output)
+            record_module(self, "prefill.context.lse", attn_lse)
             assert out is None or attn_output.data_ptr() == out.data_ptr(), (
                 f"{prefill_backend.get_name()} reports supports_out() but did not "
                 "write the context chunk into the `out` it was given."
@@ -1059,6 +1087,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 cos_sin_cache,
             )
 
+        record_module(self, "prefill.q", q)
+        record_module(self, "prefill.k", k)
+        record_module(self, "prefill.v", v)
         # When there is no chunked context, backends that honor `out` write the
         # attention result straight into it, avoiding a slice+flatten+copy.
         writes_out = not has_context and prefill.prefill_backend.supports_out()
@@ -1073,6 +1104,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 else None
             ),
         )
+        record_module(self, "prefill.new_tokens.output", output_prefill)
 
         if has_context:
             if self.dcp_world_size > 1:
@@ -1100,3 +1132,4 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             )
         elif not writes_out:
             out.copy_(output_prefill[..., : self.v_head_dim].flatten(start_dim=-2))
+        record_module(self, "prefill.output", out)
