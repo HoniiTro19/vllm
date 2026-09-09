@@ -42,7 +42,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.kimi_k3.common.compiled_trace import record_module
+from vllm.models.kimi_k3.common.compiled_trace import (
+    record_module,
+    record_module_cache_states,
+)
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -535,6 +538,36 @@ def _make_decode_norm_weight_loader(
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
+    def _trace_cache(self, metadata, *, after):
+        if getattr(self, "_k3_trace_token", None) is None:
+            return
+        phase = "after" if after else "before"
+        selections = []
+        if metadata.num_spec_decodes:
+            indices = metadata.spec_state_indices_tensor[: metadata.num_spec_decodes]
+            selections.append(("spec", indices, indices[:, 0]))
+        if metadata.num_prefills or metadata.num_decodes:
+            indices = metadata.non_spec_state_indices_tensor[
+                : metadata.num_prefills + metadata.num_decodes
+            ]
+            selections.append(("non_spec", indices, indices))
+        if after and metadata.checkpoint is not None:
+            indices = metadata.checkpoint.state_indices
+            record_module(
+                self,
+                "cache.prefill_checkpoint_offsets",
+                metadata.checkpoint.checkpoint_offsets,
+            )
+            selections.append(("prefill_checkpoints", indices, indices))
+        for kind, ssm_indices, request_indices in selections:
+            for state_index, state in enumerate(self.kv_cache):
+                record_module_cache_states(
+                    self,
+                    f"cache.{kind}.{phase}.state_{state_index}",
+                    state,
+                    ssm_indices if state_index == 1 else request_indices,
+                )
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3KDAAttentionBackend
 
@@ -935,6 +968,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state, *recoverssm_records = self.kv_cache
+        self._trace_cache(m, after=False)
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -989,6 +1023,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 "fused_decode.normalized_output",
                 core_attn_out[:, :num_actual_tokens],
             )
+            self._trace_cache(m, after=True)
             return
 
         conv_weights = self.conv1d.weight.view(
@@ -1324,6 +1359,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 )
 
         record_module(self, "recurrence.non_spec.output", core_attn_out_non_spec)
+        self._trace_cache(m, after=True)
         # Restore the scheduler's original token order for mixed batches.
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
             core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)

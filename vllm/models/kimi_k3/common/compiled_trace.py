@@ -99,6 +99,28 @@ def record_module(module, name, value):
         snapshot(path, tensor, token)
 
 
+def record_module_cache_states(module, name, cache, indices):
+    """Record indexed cache slots with their live physical identities.
+
+    Invalid slots carry zero placeholders and a mask. Slot zero is valid in
+    vLLM; the RTP paged cache uses a different reserved-slot convention.
+    """
+    if getattr(module, "_k3_trace_token", None) is None:
+        return
+    indices = indices.long()
+    valid = (indices >= 0) & (indices < cache.shape[0])
+    values = cache.index_select(0, indices.clamp(0, cache.shape[0] - 1).flatten())
+    values = values.reshape(*indices.shape, *cache.shape[1:])
+    values = torch.where(
+        valid.reshape(*valid.shape, *([1] * (cache.ndim - 1))), values, 0
+    )
+    record_module(
+        module,
+        name,
+        {"state_indices": indices, "valid_states": valid, "values": values},
+    )
+
+
 def _new_trace(name):
     identity = {
         "engine": "vllm",

@@ -99,6 +99,41 @@ class CompiledTraceTest(unittest.TestCase):
             )
 
     @torch.inference_mode()
+    def test_compiled_cache_selection_keeps_zero_slot_and_live_indices(self):
+        module = torch.nn.Module()
+        module._k3_trace_path = "kda"
+        module._k3_trace_token = torch.zeros((), dtype=torch.int64)
+
+        def operation(cache, indices):
+            tracing.record_module_cache_states(module, "cache", cache, indices)
+            cache.fill_(-100)
+            return cache
+
+        compiled = torch.compile(operation, backend="aot_eager", fullgraph=True)
+        for step in range(2):
+            cache = torch.arange(12, dtype=torch.float32).reshape(3, 2, 2)
+            indices = torch.tensor([[step, 2], [-1, 3]])
+            with tracing.model_scope("cache", metadata={"step": step}):
+                compiled(cache, indices)
+        tracing.close_process()
+        self.assertEqual(len(self.frames()), 2)
+        for frame in self.frames():
+            step = frame["metadata"]["step"]
+            tensors = {item["name"]: item["value"] for item in frame["tensors"]}
+            torch.testing.assert_close(
+                tensors["kda.cache.state_indices"], torch.tensor([[step, 2], [-1, 3]])
+            )
+            torch.testing.assert_close(
+                tensors["kda.cache.valid_states"],
+                torch.tensor([[True, True], [False, False]]),
+            )
+            expected = torch.zeros(2, 2, 2, 2)
+            expected[0] = torch.arange(12, dtype=torch.float32).reshape(3, 2, 2)[
+                [step, 2]
+            ]
+            torch.testing.assert_close(tensors["kda.cache.values"], expected)
+
+    @torch.inference_mode()
     def test_draft_aux_projection_is_recorded_outside_forward(self):
         class Draft(torch.nn.Module):
             def __init__(self):
