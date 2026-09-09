@@ -35,8 +35,8 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.utils.k3_compiled_trace import install_model_trace, record_module
 
-from ..common.compiled_trace import install_model_trace, record_module
 from ..common.mtp import fused_mtp_input
 from .low_latency_gemm import enable_kimi_k3_low_latency_gemm
 from .model import (

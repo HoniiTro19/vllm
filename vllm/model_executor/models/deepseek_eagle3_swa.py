@@ -24,7 +24,7 @@ from vllm.model_executor.models.deepseek_eagle3 import (
     DeepseekV2Eagle3Model,
     Eagle3DeepseekV2ForCausalLM,
 )
-from vllm.models.kimi_k3.common.compiled_trace import (
+from vllm.utils.k3_compiled_trace import (
     install_model_trace,
     record_module,
 )

@@ -7,8 +7,8 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
-from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.triton_utils import tl, triton
+from vllm.utils.k3_tensor_trace import enabled, event, traced_scope
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.worker.gpu.input_batch import (

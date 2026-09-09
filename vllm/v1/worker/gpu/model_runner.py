@@ -55,12 +55,6 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-from vllm.models.kimi_k3.common.compiled_trace import (
-    fullgraph_observations,
-    traced_warmup,
-)
-from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
-from vllm.models.kimi_k3.common.tensor_trace import event as k3_trace_event
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -69,6 +63,12 @@ from vllm.multimodal.encoder_budget import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.k3_compiled_trace import (
+    fullgraph_observations,
+    traced_warmup,
+)
+from vllm.utils.k3_tensor_trace import enabled as k3_trace_enabled
+from vllm.utils.k3_tensor_trace import event as k3_trace_event
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput

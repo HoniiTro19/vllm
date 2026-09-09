@@ -7,8 +7,8 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
-from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.sampling_params import SamplingParams
+from vllm.utils.k3_tensor_trace import enabled, event, traced_scope
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,

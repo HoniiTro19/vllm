@@ -3,9 +3,9 @@
 import numpy as np
 import torch
 
-from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.k3_tensor_trace import enabled, event, traced_scope
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor

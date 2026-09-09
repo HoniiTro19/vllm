@@ -30,13 +30,13 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.models.kimi_k3.common.compiled_trace import graph_capture as k3_graph_capture
-from vllm.models.kimi_k3.common.compiled_trace import (
-    graph_replay_scope as k3_graph_replay_scope,
-)
-from vllm.models.kimi_k3.common.compiled_trace import warmup_scope
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.k3_compiled_trace import graph_capture as k3_graph_capture
+from vllm.utils.k3_compiled_trace import (
+    graph_replay_scope as k3_graph_replay_scope,
+)
+from vllm.utils.k3_compiled_trace import warmup_scope
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig

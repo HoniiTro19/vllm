@@ -44,15 +44,15 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.models.kimi_k3.common.compiled_trace import (
+from vllm.platforms import current_platform
+from vllm.utils.k3_compiled_trace import (
     context_observations,
     graph_capture,
     graph_replay_scope,
     model_scope,
     warmup_scope,
 )
-from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
-from vllm.platforms import current_platform
+from vllm.utils.k3_tensor_trace import enabled as k3_trace_enabled
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 
 logger = init_logger(__name__)

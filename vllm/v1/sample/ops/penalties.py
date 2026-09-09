@@ -4,7 +4,7 @@
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
-from vllm.models.kimi_k3.common.tensor_trace import event, traced_scope
+from vllm.utils.k3_tensor_trace import event, traced_scope
 from vllm.utils.torch_utils import PIN_MEMORY, make_tensor_with_pad
 
 

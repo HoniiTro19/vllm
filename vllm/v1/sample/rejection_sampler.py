@@ -12,8 +12,8 @@ import torch.nn as nn
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
-from vllm.models.kimi_k3.common.tensor_trace import enabled, event, traced_scope
 from vllm.triton_utils import tl, triton
+from vllm.utils.k3_tensor_trace import enabled, event, traced_scope
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata

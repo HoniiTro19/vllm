@@ -42,10 +42,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.kimi_k3.common.compiled_trace import (
-    record_module,
-    record_module_cache_states,
-)
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -59,6 +55,10 @@ from vllm.utils.flashinfer import (
     flashinfer_recurrent_kda,
     has_flashinfer_fused_kda_decode,
     has_flashinfer_recurrent_kda,
+)
+from vllm.utils.k3_compiled_trace import (
+    record_module,
+    record_module_cache_states,
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID

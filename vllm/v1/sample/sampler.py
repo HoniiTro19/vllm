@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
-from vllm.models.kimi_k3.common.tensor_trace import event, traced_scope
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.k3_tensor_trace import event, traced_scope
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata

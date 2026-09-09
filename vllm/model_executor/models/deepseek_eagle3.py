@@ -23,8 +23,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLAAttention,
     DeepseekV2MLP,
 )
-from vllm.models.kimi_k3.common.compiled_trace import record_module
 from vllm.multimodal.inputs import NestedTensors
+from vllm.utils.k3_compiled_trace import record_module
 
 from .interfaces import LocalArgmaxMixin
 from .utils import (

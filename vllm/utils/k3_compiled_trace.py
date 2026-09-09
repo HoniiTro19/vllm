@@ -23,7 +23,7 @@ from typing import Any
 
 import torch
 
-from .tensor_trace import TensorTrace, enabled
+from .k3_tensor_trace import TensorTrace, enabled
 
 
 class _TraceLocal(threading.local):

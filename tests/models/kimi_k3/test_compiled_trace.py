@@ -6,8 +6,8 @@ The failure under test is a missing/reordered observation after compilation or
 graph replay, so compare saved tensor values rather than Python hook counters.
 """
 
-import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,28 +17,24 @@ from unittest.mock import patch
 
 import torch
 
-COMMON = Path(__file__).resolve().parents[3] / "vllm/models/kimi_k3/common"
-
-
-def load_local_module(filename):
-    # Reuse the canonical module identity if another test imported vLLM first;
-    # custom operators must not be registered twice in the same process.
-    name = f"vllm.models.kimi_k3.common.{filename}"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, COMMON / f"{filename}.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-load_local_module("tensor_trace")
-tracing = load_local_module("compiled_trace")
+from vllm.utils import k3_compiled_trace as tracing
 
 
 class CompiledTraceTest(unittest.TestCase):
+    def test_normal_import_does_not_load_k3_model_implementation(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from vllm.utils import k3_compiled_trace; "
+                "assert 'vllm.models.kimi_k3' not in sys.modules",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
