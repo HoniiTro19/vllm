@@ -42,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.kimi_k3.common.compiled_trace import record_module
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -852,6 +853,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             mixed_qkv, g_proj_states, f_a, beta = projected[:4]
             g1 = self.f_b_proj(f_a)[0]
 
+        record_module(
+            self, "projection.qkv", mixed_qkv.split(self.local_projection_size, dim=-1)
+        )
+        record_module(self, "projection.raw_gate", g1)
+        record_module(self, "projection.raw_beta", beta)
+        record_module(self, "projection.output_gate", g_proj_states)
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
@@ -907,6 +914,20 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         spec_query_start_loc = m.spec_query_start_loc
         num_accepted_tokens = m.num_accepted_tokens
         num_actual_tokens = m.num_actual_tokens
+        record_module(
+            self,
+            "recurrence.metadata",
+            {
+                "non_spec_query_start_loc": non_spec_query_start_loc,
+                "non_spec_state_indices": non_spec_state_indices_tensor,
+                "spec_query_start_loc": spec_query_start_loc,
+                "spec_state_indices": spec_state_indices_tensor,
+                "spec_token_indices": spec_token_indx,
+                "non_spec_token_indices": non_spec_token_indx,
+                "num_accepted_tokens": num_accepted_tokens,
+                "has_initial_state": has_initial_state,
+            },
+        )
         checkpoint = m.checkpoint
         has_spec_decode = m.num_spec_decodes > 0
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -963,6 +984,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     norm_weight=self.decode_norm_weight,
                     norm_eps=self.o_norm.eps,
                 )
+            record_module(
+                self,
+                "fused_decode.normalized_output",
+                core_attn_out[:, :num_actual_tokens],
+            )
             return
 
         conv_weights = self.conv1d.weight.view(
@@ -1024,6 +1050,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
             spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
+            record_module(self, "conv.spec.qkv", (q_spec, k_spec, v_spec))
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
                 if m.num_prefills == 0 and m.num_decodes == 0
@@ -1072,6 +1099,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     out=spec_out,
                 )
 
+            record_module(self, "recurrence.spec.output", core_attn_out_spec)
+
         # Prefill or plain-decode path.
         core_attn_out_non_spec = None
         if mixed_qkv_ns is not None:
@@ -1115,6 +1144,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     has_initial_state,
                 )
+                record_module(self, "conv.prefill.qkv", (q_ns, k_ns, v_ns))
+                record_module(self, "recurrence.initial_state", initial_state)
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
                     assert self._flashkda_buffer_specs is not None
@@ -1252,6 +1283,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
                     )
+                record_module(self, "recurrence.final_state", last_recurrent_state)
                 recurrent_state[non_spec_state_indices_tensor] = (
                     last_recurrent_state.to(recurrent_state.dtype)
                 )
@@ -1272,6 +1304,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     validate_data=True,
                     out=packed_conv_out,
                 )
+                record_module(
+                    self,
+                    "conv.decode.qkv",
+                    mixed_qkv_ns.split(self.local_projection_size, dim=-1),
+                )
                 (
                     core_attn_out_non_spec,
                     _,
@@ -1286,6 +1323,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     state_indices=decode_conv_indices,
                 )
 
+        record_module(self, "recurrence.non_spec.output", core_attn_out_non_spec)
         # Restore the scheduler's original token order for mixed batches.
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
             core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
@@ -1303,4 +1341,5 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert core_attn_out_spec is not None
         # Triton normalizes in place, so this is a self-copy with no device
         # work. Keep it for the out-of-place native implementation.
+        record_module(self, "recurrence.output", core_attn_out[:, :num_actual_tokens])
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
