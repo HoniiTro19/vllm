@@ -345,7 +345,6 @@ class MambaHybridModelState(DefaultModelState):
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
-
         def trace_state(stage):
             if not enabled():
                 return

@@ -16,15 +16,24 @@ import os
 import socket
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 import torch
 
 from .tensor_trace import TensorTrace, enabled
 
-_local = threading.local()
+
+class _TraceLocal(threading.local):
+    def __init__(self):
+        self.warmup_depth: int = 0
+        self.stack: list[TensorTrace] = []
+        self.scope_metadata: list[dict[str, Any]] = []
+
+
+_local = _TraceLocal()
 _lock = threading.RLock()
 _owners = {}
 _graphs = {}
@@ -68,7 +77,7 @@ def scalar_tree(name, value):
 @torch.library.custom_op("k3_trace::snapshot", mutates_args=("token",))
 def snapshot(name: str, value: torch.Tensor, token: torch.Tensor) -> None:
     stack = _stack()
-    if not stack and not getattr(_local, "warmup_depth", 0):
+    if not stack and not _local.warmup_depth:
         raise RuntimeError(f"compiled K3 trace outside model/capture scope: {name}")
     if stack:
         stack[-1].record(name, value, model_scopes=_scope_metadata())
@@ -112,7 +121,7 @@ def _new_trace(name):
 
 
 def _record_boundary(name, value):
-    if not _stack() and getattr(_local, "warmup_depth", 0):
+    if not _stack() and _local.warmup_depth:
         return
     for path, tensor in tensor_tree(name, value):
         _stack()[-1].record(path, tensor, model_scopes=_scope_metadata())
@@ -125,7 +134,7 @@ def model_scope(name, inputs=None, metadata=None):
         return
     with _lock:
         stack = _stack()
-        if not stack and getattr(_local, "warmup_depth", 0):
+        if not stack and _local.warmup_depth:
             yield
             return
         owns_frame = not stack
@@ -147,10 +156,8 @@ def model_scope(name, inputs=None, metadata=None):
                 trace.end()
         except BaseException:
             if owns_frame:
-                try:
+                with suppress(RuntimeError):
                     trace._fail("vLLM K3 model execution aborted")
-                except RuntimeError:
-                    pass
             raise
         finally:
             _local.scope_metadata.pop()
@@ -160,7 +167,7 @@ def model_scope(name, inputs=None, metadata=None):
 
 @contextmanager
 def warmup_scope():
-    _local.warmup_depth = getattr(_local, "warmup_depth", 0) + 1
+    _local.warmup_depth += 1
     try:
         yield
     finally:
@@ -194,17 +201,15 @@ def graph_capture(metadata):
             yield key
             trace.end_capture()
         except BaseException:
-            try:
+            with suppress(RuntimeError):
                 trace._fail("vLLM K3 CUDA Graph capture aborted")
-            except RuntimeError:
-                pass
             raise
         finally:
             _stack().pop()
 
 
 def graph_replay(key, inputs, metadata):
-    if key is None or (getattr(_local, "warmup_depth", 0) and not _stack()):
+    if key is None or (_local.warmup_depth and not _stack()):
         return
     with _lock:
         trace = _graphs[key]
@@ -223,7 +228,7 @@ def graph_replay(key, inputs, metadata):
 @contextmanager
 def graph_replay_scope(key, inputs, metadata):
     """Snapshot mutable graph buffers before execution and after execution."""
-    if key is None or (getattr(_local, "warmup_depth", 0) and not _stack()):
+    if key is None or (_local.warmup_depth and not _stack()):
         yield
         return
     with model_scope("graph.live_io", inputs, {"capture_key": key, **metadata}):
@@ -378,9 +383,9 @@ def install_model_trace(model, name, context_provider=None):
                 # OptimizedModule forwards attributes to its wrapped module;
                 # observe the original module, not the compiler wrapper.
                 continue
-            info = {"path": path, "type": type(module).__qualname__}
+            info: dict[str, Any] = {"path": path, "type": type(module).__qualname__}
             shard = getattr(module, "shard_indices", None)
-            if dataclasses.is_dataclass(shard):
+            if dataclasses.is_dataclass(shard) and not isinstance(shard, type):
                 info["vocab_shard_indices"] = dataclasses.asdict(shard)
             inventory.append(info)
             if module in installed:

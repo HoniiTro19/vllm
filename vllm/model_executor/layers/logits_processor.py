@@ -20,8 +20,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
-from vllm.platforms import current_platform
 from vllm.models.kimi_k3.common.compiled_trace import record_module
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)

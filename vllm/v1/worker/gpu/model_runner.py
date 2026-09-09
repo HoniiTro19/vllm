@@ -29,12 +29,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.models.kimi_k3.common.compiled_trace import (
-    fullgraph_observations,
-    traced_warmup,
-)
-from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
-from vllm.models.kimi_k3.common.tensor_trace import event as k3_trace_event
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -61,6 +55,12 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.models.kimi_k3.common.compiled_trace import (
+    fullgraph_observations,
+    traced_warmup,
+)
+from vllm.models.kimi_k3.common.tensor_trace import enabled as k3_trace_enabled
+from vllm.models.kimi_k3.common.tensor_trace import event as k3_trace_event
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -1574,8 +1574,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 tensors,
                 {
                     "request_id_to_index": self.req_states.req_id_to_index,
-                    "max_seq_len_by_request_index": self.req_states.max_seq_len.tolist(),
-                    "inactive_token_tail": "only positions below total_len are committed",
+                    "max_seq_len_by_request_index": (
+                        self.req_states.max_seq_len.tolist()
+                    ),
+                    "inactive_token_tail": (
+                        "only positions below total_len are committed"
+                    ),
                 },
             )
 

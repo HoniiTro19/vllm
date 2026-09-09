@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
-from vllm.models.kimi_k3.common.compiled_trace import traced_warmup
 import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
@@ -105,6 +104,7 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.models.kimi_k3.common.compiled_trace import traced_warmup
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (

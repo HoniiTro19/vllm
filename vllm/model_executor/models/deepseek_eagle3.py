@@ -43,7 +43,7 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
     2. First layer accepts concatenated embeds + hidden_states
     """
 
-    attention_cls = DeepseekV2MLAAttention
+    attention_cls: type[nn.Module] = DeepseekV2MLAAttention
 
     def __init__(
         self,

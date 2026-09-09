@@ -406,9 +406,9 @@ class CudaGraphManager:
                         if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                             forward_fn(CUDAGraphMode.PIECEWISE)
                             continue
-                        assert (
-                            desc not in self.graphs
-                        ), f"Graph already captured for {desc}"
+                        assert desc not in self.graphs, (
+                            f"Graph already captured for {desc}"
+                        )
                         graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
@@ -482,9 +482,9 @@ class CudaGraphManager:
         self, desc: BatchExecutionDescriptor, *, trace_inputs=None, trace_metadata=None
     ):
         """Replay a captured FULL cudagraph."""
-        assert (
-            desc.cg_mode == CUDAGraphMode.FULL
-        ), f"Expected FULL mode, got {desc.cg_mode}"
+        assert desc.cg_mode == CUDAGraphMode.FULL, (
+            f"Expected FULL mode, got {desc.cg_mode}"
+        )
         assert desc in self.graphs, f"No cudagraph for {desc}"
         # Sync offloader before replay - needed when transitioning from
         # eager/piecewise to full cudagraph (e.g., prefill → decode).

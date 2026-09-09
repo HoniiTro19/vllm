@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -26,6 +27,7 @@ def load_local_module(filename):
     if name in sys.modules:
         return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, COMMON / f"{filename}.py")
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -48,7 +50,7 @@ class CompiledTraceTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for name in ("_owners", "_graphs"):
-            context = patch.object(tracing, name, {})
+            context: Any = patch.object(tracing, name, {})
             context.start()
             self.addCleanup(context.stop)
         self.addCleanup(tracing.close_process)
@@ -164,10 +166,12 @@ class CompiledTraceTest(unittest.TestCase):
         with tracing.warmup_scope(), tracing.model_scope("warmup"):
             compiled(value, token)
         graph = torch.cuda.CUDAGraph()
-        with tracing.warmup_scope():
-            with tracing.graph_capture({"bucket": 4}) as key:
-                with torch.cuda.graph(graph):
-                    compiled(value, token)
+        with (
+            tracing.warmup_scope(),
+            tracing.graph_capture({"bucket": 4}) as key,
+            torch.cuda.graph(graph),
+        ):
+            compiled(value, token)
         for step in range(3):
             value.fill_(step)
             graph.replay()

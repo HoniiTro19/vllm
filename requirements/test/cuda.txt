@@ -1227,7 +1227,6 @@ tokenizers==0.23.1
     #   transformers
 torch==2.13.0+cu130
     # via
-    #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   accelerate
     #   compressed-tensors
@@ -1249,7 +1248,6 @@ torch-abi-audit==0.0.1
     # via -r requirements/test/cuda.in
 torchaudio==2.11.0+cu130
     # via
-    #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
@@ -1259,7 +1257,6 @@ torchcodec==0.14.0+cu130
     #   -r requirements/test/cuda.in
 torchvision==0.28.0+cu130
     # via
-    #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   open-clip-torch
     #   segmentation-models-pytorch

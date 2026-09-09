@@ -1221,9 +1221,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 self.output_attn_res_proj = PPMissingLayer()
 
         world_size = get_tensor_model_parallel_world_size()
-        assert (
-            config.num_attention_heads % world_size == 0
-        ), "num_attention_heads must be divisible by world_size"
+        assert config.num_attention_heads % world_size == 0, (
+            "num_attention_heads must be divisible by world_size"
+        )
 
     def make_empty_intermediate_tensors(
         self,
@@ -1392,9 +1392,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert (
-                not self.use_sequence_parallel
-            ), "Currently, SP is not supported with PP"
+            assert not self.use_sequence_parallel, (
+                "Currently, SP is not supported with PP"
+            )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
             return IntermediateTensors(
@@ -2101,13 +2101,13 @@ class KimiK3ForConditionalGeneration(
 
         target_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(target_dtype)
-        assert isinstance(
-            grid_thws, torch.Tensor
-        ), f"expect grid_thws to be a tensor, got {type(grid_thws)}"
+        assert isinstance(grid_thws, torch.Tensor), (
+            f"expect grid_thws to be a tensor, got {type(grid_thws)}"
+        )
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])
-        assert (
-            grid_thws.ndim == 2 and grid_thws.size(1) == 3
-        ), f"unexpected shape for grid_thws: {grid_thws.shape}"
+        assert grid_thws.ndim == 2 and grid_thws.size(1) == 3, (
+            f"unexpected shape for grid_thws: {grid_thws.shape}"
+        )
 
         return KimiK25MediaPixelInputs(
             type="pixel_values",
