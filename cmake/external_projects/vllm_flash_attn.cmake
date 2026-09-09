@@ -57,6 +57,22 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
+# FA2 ships SM80 cubins plus PTX by default. A newer toolkit's PTX may not
+# load on the deployment driver, even when its native cubins are compatible.
+# Allow a source build to include native code for its requested GPU targets.
+option(VLLM_FA2_NATIVE_ARCHS "Also compile FA2 for the requested CUDA architectures" OFF)
+if(DEFINED ENV{VLLM_FA2_NATIVE_ARCHS})
+  set(VLLM_FA2_NATIVE_ARCHS $ENV{VLLM_FA2_NATIVE_ARCHS})
+endif()
+if(VLLM_FA2_NATIVE_ARCHS AND VLLM_GPU_LANG STREQUAL "CUDA" AND TARGET _vllm_fa2_C)
+  foreach(_ARCH ${CUDA_ARCHS})
+    string(REPLACE "." "" _NATIVE_ARCH "${_ARCH}")
+    target_compile_options(_vllm_fa2_C PRIVATE
+      "$<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_${_NATIVE_ARCH},code=sm_${_NATIVE_ARCH}>")
+  endforeach()
+  message(STATUS "FA2 additional native architectures: ${CUDA_ARCHS}")
+endif()
+
 # Restore the install prefix after FA's install rules
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
