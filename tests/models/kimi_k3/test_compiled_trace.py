@@ -90,6 +90,22 @@ class CompiledTraceTest(unittest.TestCase):
             )
             torch.testing.assert_close(tensors["layer.output"], expected * 2)
 
+    def test_compiled_native_overflow_flag_cannot_close_as_a_complete_trace(self):
+        def operation(flag, token):
+            tracing.snapshot("experts.native.overflow", flag, token, True)
+            flag.zero_()
+            return flag.clone()
+
+        compiled = torch.compile(operation, backend="aot_eager", fullgraph=True)
+        with tracing.model_scope("native-overflow"):
+            compiled(
+                torch.ones(1, dtype=torch.int32), torch.zeros((), dtype=torch.int64)
+            )
+        with self.assertRaisesRegex(RuntimeError, "nonzero diagnostic failure flag"):
+            tracing.close_process()
+        self.assertTrue(list(self.root.glob("*/incomplete.json")))
+        self.assertFalse(list(self.root.glob("*/recorder_closed.json")))
+
     @torch.inference_mode()
     def test_fullgraph_retains_observations_before_input_mutation_on_every_call(self):
         def operation(value, token):

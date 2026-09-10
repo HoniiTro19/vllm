@@ -117,7 +117,9 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.k3_compiled_trace import install_model_trace, record_module
 from vllm.utils.k3_megamoe_trace import (
     expert_output_tensors,
+    native_trace_tensors,
     prepare_expert_output_view,
+    prepare_native_trace_factory,
 )
 from vllm.utils.k3_tensor_trace import enabled as trace_enabled
 from vllm.utils.math_utils import cdiv
@@ -449,6 +451,9 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer._k3_expert_output_view = prepare_expert_output_view(
                 symm_buffer, deep_gemm
             )
+            symm_buffer._k3_native_trace_factory = prepare_native_trace_factory(
+                deep_gemm
+            )
         return symm_buffer
 
     def forward(
@@ -534,6 +539,23 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.finalize_weights()
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
+        native_trace = None
+        if getattr(self, "_k3_trace_token", None) is not None:
+            # TP sequence shards are padded uniformly. Across DP replicas, use
+            # the scheduler bound because their local token counts may differ.
+            trace_capacity = (
+                self.max_num_tokens
+                if get_ep_group().world_size > get_tensor_model_parallel_world_size()
+                else max(1, num_tokens)
+            )
+            native_trace = symm_buffer._k3_native_trace_factory(
+                symm_buffer.group.size(),
+                trace_capacity,
+                symm_buffer.num_topk,
+                symm_buffer.intermediate_hidden,
+                y.device,
+            )
+            native_trace.reset()
         deep_gemm.fp8_fp4_mega_moe(
             y,
             self._transformed_l1_weights,
@@ -544,7 +566,14 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             situ_beta=self.activation_beta,
             situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
+            **({"k3_trace": native_trace.buffer} if native_trace is not None else {}),
         )
+        if native_trace is not None:
+            record_module(
+                self, "experts.native.overflow", native_trace.overflow, assert_zero=True
+            )
+            for name, value in native_trace_tensors(native_trace):
+                record_module(self, f"experts.native.{name}", value)
         record_module(self, "dispatch.output", y)
         if getattr(self, "_k3_trace_token", None) is not None:
             record_module(

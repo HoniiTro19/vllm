@@ -75,28 +75,32 @@ def scalar_tree(name, value):
 
 
 @torch.library.custom_op("k3_trace::snapshot", mutates_args=("token",))
-def snapshot(name: str, value: torch.Tensor, token: torch.Tensor) -> None:
+def snapshot(
+    name: str, value: torch.Tensor, token: torch.Tensor, assert_zero: bool = False
+) -> None:
     stack = _stack()
     if not stack and not _local.warmup_depth:
         raise RuntimeError(f"compiled K3 trace outside model/capture scope: {name}")
     if stack:
-        stack[-1].record(name, value, model_scopes=_scope_metadata())
+        stack[-1].record(
+            name, value, model_scopes=_scope_metadata(), assert_zero=assert_zero
+        )
     token.add_(1)
 
 
 @snapshot.register_fake
-def _snapshot_fake(name, value, token):
+def _snapshot_fake(name, value, token, assert_zero=False):
     return None
 
 
-def record_module(module, name, value):
+def record_module(module, name, value, *, assert_zero=False):
     # Hooks are only installed when enabled, and these attributes are static
     # module state while Dynamo traces the inner model.
     token = getattr(module, "_k3_trace_token", None)
     if token is None:
         return
     for path, tensor in tensor_tree(f"{module._k3_trace_path}.{name}", value):
-        snapshot(path, tensor, token)
+        snapshot(path, tensor, token, assert_zero)
 
 
 def record_module_cache_states(module, name, cache, indices):
