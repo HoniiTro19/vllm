@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -43,7 +44,11 @@ class CompiledTraceTest(unittest.TestCase):
         self.root = Path(temp.name)
         env = patch.dict(
             os.environ,
-            {"K3_TRACE_ROOT": str(self.root), "K3_TRACE_RUN_ID": "compile-test"},
+            {
+                "K3_TRACE_ROOT": str(self.root),
+                "K3_TRACE_RUN_ID": "compile-test",
+                "K3_TRACE_COMPRESSION": "deflate",
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -77,6 +82,14 @@ class CompiledTraceTest(unittest.TestCase):
         tracing.close_process()
         frames = self.frames()
         self.assertEqual(len(frames), 2)
+        for path in self.root.glob("*/frame-*.pt"):
+            with zipfile.ZipFile(path) as archive:
+                self.assertTrue(
+                    all(
+                        m.compress_type == zipfile.ZIP_DEFLATED
+                        for m in archive.infolist()
+                    )
+                )
         for step, frame in enumerate(frames):
             self.assertEqual(
                 frame["metadata"]["request_ids"],
